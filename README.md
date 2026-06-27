@@ -1,23 +1,17 @@
 # YL MeshCheckHUD
 
-**Mesh density, dimensions, topology issues, and visual HUD feedback directly in the Blender viewport.**
+**Check mesh issues directly in the Blender viewport, fix your model, and see whether the problems have been cleaned up in real time.**
 
-YL MeshCheckHUD is a lightweight Blender addon for artists, modelers, and asset reviewers who want to understand mesh quality without constantly switching panels, running separate tools, or interrupting their modeling flow.
+Suitable for:
 
-It brings the most useful mesh information directly into the **3D Viewport**, helping you quickly spot what matters:
+- Pre-delivery model checks
+- Hard-surface model cleanup
+- Quickly finding problematic objects in large scenes
+- Checking common issues such as Ngons, overlapping vertices, non-manifold geometry, and tiny faces
 
-- 🎯 **Topology issue locations**: see exactly where common mesh problems appear
-- 📏 **Accurate dimensions**: check the real size of selected objects
-- ✂️ **Edit Mode selection size**: view the size of selected vertices, edges, or faces in real time while editing
-- 🔍 **Mesh density**: monitor triangle count while you model
-- 🔥 **Object complexity**: instantly identify which objects are heavier than the rest
-- ⚠️ **Unapplied scale warnings**: catch scale issues before they cause trouble
+---
 
-## Multilingual Support
-
-YL MeshCheckHUD is built with broad multilingual support and automatically follows your Blender interface language.
-
-Current language support includes **15 language variants**:
+## Language Support
 
 - English
 - 中文（简体 / 繁體）
@@ -32,101 +26,78 @@ Current language support includes **15 language variants**:
 - Русский
 - Tiếng Việt
 
-## Where Is It Located in Blender?
+---
 
-After installation, open the **3D Viewport** sidebar with `N`, then go to the **YL MeshCheckHUD** tab.
+## Check Mode: Fix Models While Watching the Results
 
-The addon includes three main tools:
+**Check Mode** is the core feature of YL MeshCheckHUD.  
+It displays common topology issues directly on the model and shows the count of each issue type in the sidebar list.
 
-- **Live HUD**
-- **Heatmap Preview**
-- **Check Mode**
+You can fix the model while watching the results update, without manually refreshing the check.
+
+Supported checks:
+
+- Ngons
+- Overlapping vertices
+- Loose vertices
+- Needle triangles
+- Tiny faces
+- Poles
+- Non-manifold edges
+- Missing sharp edges
+
+<img width="800" height="500" alt="Realtime fix" src="https://github.com/user-attachments/assets/dd29aeb8-6a5f-47aa-a5d1-8e0fb1f08ca4" />
 
 ---
 
-## Live HUD
+## Realtime HUD: View Key Mesh Information While Modeling
 
-The **Live HUD** shows useful mesh information directly in the viewport while you work.
+**Realtime HUD** displays commonly used mesh information directly in the 3D viewport, such as the triangle count and dimensions of the selected mesh. Whether you select the whole object or part of the mesh in Edit Mode, the HUD shows the result directly in the viewport.
 
 It can display:
 
-- real-time triangle count
-- overall dimensions of the current selection
-- single-object and multi-object selection stats
-- Edit Mode selection dimensions for selected vertices, edges, or faces
-- unapplied scale warnings
-<img width="760" height="560" alt="hud" src="https://github.com/user-attachments/assets/79713953-e095-4ba1-8fcd-63518b500da5" />
+- Triangle count of the current model
+- Dimensions of the selected object
+- Statistics for multiple selected objects
+- Dimensions of selected vertices, edges, or faces in Edit Mode
+- Unapplied scale warning
 
-This is especially useful when you want to monitor scale, density, and basic mesh health without breaking your modeling flow.
-
-## Heatmap Preview
-
-**Heatmap Preview** gives you a fast visual overview of mesh complexity across your scene.
-
-Objects with higher triangle counts shift toward warmer colors, while lighter objects stay cooler. This makes it easy to see which models may need optimization before you even open a detailed report.
-
-Heatmap Preview also includes a sortable result list, so you can compare objects by:
-
-- triangle count
-- triangle ratio
-- material count
-- UV count
-- object name
-<img width="760" height="560" alt="热力" src="https://github.com/user-attachments/assets/7d9547af-4914-4fc2-a92e-87c471d25596" />
-
-Useful for:
-
-- scene review
-- game asset optimization
-- production model cleanup
-- checking density balance across multiple objects
-
-## Check Mode
-
-**Check Mode** helps you find common topology issues directly on the mesh.
-
-It can detect and highlight:
-
-- **Ngons**
-- **Doubles**
-- **Isolated vertices**
-- **Needle triangles**
-- **Tiny faces**
-- **Poles**
-- **Non-manifold edges**
-- **Missing sharp edges**
-<img width="760" height="560" alt="check(1)" src="https://github.com/user-attachments/assets/ba5cdf32-a4df-4a54-82c2-84415338a01f" />
-
-Each issue type uses its own viewport color, so problems are easy to read at a glance.
-
-You can also:
-
-- sort check results
-- enable or disable individual checks
-- hide or show specific result columns
-- adjust check thresholds
-- use X-Ray overlay for clearer inspection
+<img width="760" height="560" alt="HUD" src="https://github.com/user-attachments/assets/79713953-e095-4ba1-8fcd-63518b500da5" />
 
 ---
 
-## Why Use YL MeshCheckHUD?
+## Heatmap Preview: Quickly Find Objects With Unusual Complexity
 
-YL MeshCheckHUD is designed to make mesh review faster, clearer, and more visual.
+**Heatmap Preview** uses color to visualize the triangle count of objects in the scene. It also shows each object's triangle percentage, material / material slot count, and UV count in the list and HUD.
 
-Instead of checking mesh data one step at a time, you can:
+Suitable for checking:
 
-- monitor mesh stats while modeling
-- measure selected parts directly in Edit Mode
-- compare object density with a heatmap
-- spot topology problems directly on the model
-- focus only on the checks you care about
-- review assets before export or delivery
+- Object triangle count
+- Triangle percentage in the scene
+- Material count / material slot count
+- UV count
 
-It is a practical tool for **hard-surface modeling, asset cleanup, scene review, game-ready optimization, and general mesh inspection**.
+<img width="760" height="560" alt="Heatmap" src="https://github.com/user-attachments/assets/7d9547af-4914-4fc2-a92e-87c471d25596" />
+
+---
+
+## Location in Blender
+
+After installation, press `N` to open the **3D Viewport Sidebar**, then go to the **YL MeshCheckHUD** tab.
+
+The add-on includes three main tools:
+
+- Check Mode
+- Heatmap Preview
+- Realtime HUD
+
+---
 
 ## Supported Blender Versions
 
 - Blender **4.2** to **5.3**
+
+---
 
 ## License
 
