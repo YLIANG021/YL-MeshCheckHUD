@@ -143,10 +143,6 @@ def _draw_tag(label, left, top):
     blf.draw(FONT_ID, label)
 
 
-def draw_callback_view():
-    return
-
-
 def draw_callback_px():
     context = bpy.context
     if context is None or not is_heatmap_active(context) or not is_preview_owner_context(context):

@@ -1,17 +1,10 @@
 import bpy
 
-from .core import CACHE, deferred_update, tag_update_dirty
+from .core import CACHE, deferred_update, ensure_update_timer, tag_update_dirty
 from .draw import draw_callback_px
 
 
 DRAW_HANDLER = None
-
-
-@bpy.app.handlers.persistent
-def on_file_load(dummy):
-    """Refresh overlay data after loading a new blend file."""
-    del dummy
-    tag_update_dirty()
 
 
 def register_handlers():
@@ -26,13 +19,8 @@ def register_handlers():
             "POST_PIXEL",
         )
 
-    if tag_update_dirty not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(tag_update_dirty)
-
-    if on_file_load not in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.append(on_file_load)
-
     tag_update_dirty()
+    ensure_update_timer()
 
 
 def unregister_handlers():
@@ -46,13 +34,10 @@ def unregister_handlers():
         bpy.types.SpaceView3D.draw_handler_remove(DRAW_HANDLER, "WINDOW")
         DRAW_HANDLER = None
 
-    if tag_update_dirty in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(tag_update_dirty)
-
-    if on_file_load in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.remove(on_file_load)
-
     CACHE["data"] = None
     CACHE["text_layout"] = {}
     CACHE["text_signature"] = None
     CACHE["needs_update"] = False
+    CACHE["edit_trigger_signature"] = None
+    CACHE["edit_geometry_signature"] = None
+    CACHE["edit_geometry_signature_time"] = 0.0

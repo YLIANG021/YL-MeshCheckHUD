@@ -9,26 +9,19 @@ from .meshcheck_panel import (
 from .panels import (
     YLOMNIHUD_PT_main,
 )
-from .._registration import register_classes, unregister_classes
-
-
-CLASSES = (
-    YLOMNIHUD_PT_main,
-    YLOMNIHUD_PT_meshcheck,
-    YLOMNIHUD_UL_check_results,
-    YLOMNIHUD_UL_preview_results,
-)
 
 
 def register():
-    try:
-        icons.register()
-        register_classes(CLASSES)
-    except Exception:
-        unregister()
-        raise
+    icons.register()
+    bpy.utils.register_class(YLOMNIHUD_PT_main)
+    bpy.utils.register_class(YLOMNIHUD_PT_meshcheck)
+    bpy.utils.register_class(YLOMNIHUD_UL_check_results)
+    bpy.utils.register_class(YLOMNIHUD_UL_preview_results)
 
 
 def unregister():
-    unregister_classes(CLASSES)
+    bpy.utils.unregister_class(YLOMNIHUD_UL_preview_results)
+    bpy.utils.unregister_class(YLOMNIHUD_UL_check_results)
+    bpy.utils.unregister_class(YLOMNIHUD_PT_meshcheck)
+    bpy.utils.unregister_class(YLOMNIHUD_PT_main)
     icons.unregister()

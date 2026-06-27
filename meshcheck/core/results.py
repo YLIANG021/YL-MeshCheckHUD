@@ -2,7 +2,12 @@ import bpy
 
 from ...heatmap.logic import is_heatmap_active, set_focus_object_name
 from ...mesh_metrics import get_evaluated_object_triangle_count
-from .config import _meshcheck_settings_from_context, get_enabled_check_ids, get_visible_check_ids
+from .config import (
+    _get_check_settings_signature,
+    _meshcheck_settings_from_context,
+    get_enabled_check_ids,
+    get_visible_check_ids,
+)
 from .geometry import _get_mesh_object_state_signature, _get_preview_object_state_signature, get_geometry_memo
 from .overlay import (
     _active_mesh_object,
@@ -25,7 +30,6 @@ from .runtime import (
     _get_cached_scope_object_names,
     _preview_result_states,
     _safe_visible_get,
-    _scope_cache_signature,
     _store_cached_scope_object_names,
     _store_check_result_states,
     _store_edit_check_overlay_cache,
@@ -37,6 +41,12 @@ from .runtime import (
     invalidate_preview_cache,
     tag_check_redraw,
 )
+
+
+def _sync_meshcheck_depsgraph_handler(context):
+    from ..handlers import sync_depsgraph_handler_state
+
+    sync_depsgraph_handler_state(context)
 
 
 def _iter_mesh_objects(context, scope):
@@ -68,6 +78,24 @@ def _iter_mesh_objects(context, scope):
     return objects
 
 
+def _get_check_inputs_signature(context, settings=None):
+    if settings is None:
+        settings = _meshcheck_settings_from_context(context)
+    return (
+        tuple(get_enabled_check_ids(settings)),
+        _get_check_settings_signature(context),
+    )
+
+
+def _get_check_result_state_signature(context, obj, check_inputs_signature=None):
+    if check_inputs_signature is None:
+        check_inputs_signature = _get_check_inputs_signature(context)
+    return (
+        _get_mesh_object_state_signature(obj),
+        check_inputs_signature,
+    )
+
+
 def _get_meshcheck_refresh_signature(context, scope, mode="preview"):
     depsgraph = None
     if mode == "preview":
@@ -75,6 +103,8 @@ def _get_meshcheck_refresh_signature(context, scope, mode="preview"):
             depsgraph = context.evaluated_depsgraph_get()
         except (AttributeError, ReferenceError, RuntimeError):
             depsgraph = None
+    else:
+        check_inputs_signature = _get_check_inputs_signature(context)
     entries = []
     for obj in _iter_mesh_objects(context, scope):
         try:
@@ -84,11 +114,25 @@ def _get_meshcheck_refresh_signature(context, scope, mode="preview"):
         if mode == "preview":
             state_signature = _get_preview_object_state_signature(obj, depsgraph)
         else:
-            state_signature = _get_mesh_object_state_signature(obj)
+            state_signature = _get_check_result_state_signature(
+                context,
+                obj,
+                check_inputs_signature,
+            )
         entries.append((obj.name, int(is_visible), state_signature))
 
     entries.sort(key=lambda item: item[0])
     return "\n".join(repr(item) for item in entries)
+
+
+def format_material_slot_value(item):
+    material_count = int(getattr(item, "material_count", 0))
+    slot_count = int(getattr(item, "material_slot_count", material_count))
+    if slot_count <= 0 and material_count > 0:
+        slot_count = material_count
+    if material_count == slot_count:
+        return str(material_count)
+    return f"{material_count}/{slot_count}"
 
 
 def get_stored_refresh_signature(scene, mode):
@@ -111,6 +155,7 @@ def _preview_result(context, obj, depsgraph):
     del context
     mesh = getattr(obj, "data", None)
     material_count = 0
+    material_slot_count = 0
     uv_count = 0
     if mesh is not None:
         try:
@@ -124,6 +169,10 @@ def _preview_result(context, obj, depsgraph):
         except Exception:
             material_count = 0
         try:
+            material_slot_count = len(getattr(obj, "material_slots", ()))
+        except Exception:
+            material_slot_count = 0
+        try:
             uv_count = len(getattr(mesh, "uv_layers", ()))
         except Exception:
             uv_count = 0
@@ -131,6 +180,7 @@ def _preview_result(context, obj, depsgraph):
         "object_name": obj.name,
         "tris": get_evaluated_object_triangle_count(obj, depsgraph),
         "material_count": material_count,
+        "material_slot_count": material_slot_count,
         "uv_count": uv_count,
         "ratio": 0.0,
         "findings": 0,
@@ -185,6 +235,7 @@ def _sync_results_to_settings(context, results, mode="preview", active_index_ove
             entry.tris = item.get("tris", 0)
             if mode == "preview":
                 entry.material_count = item.get("material_count", 0)
+                entry.material_slot_count = item.get("material_slot_count", 0)
                 entry.uv_count = item.get("uv_count", 0)
                 entry.ratio = item.get("ratio", 0.0)
             else:
@@ -218,6 +269,7 @@ def _preview_item_to_dict(item):
         "object_name": item.object_name,
         "tris": item.tris,
         "material_count": item.material_count,
+        "material_slot_count": item.material_slot_count,
         "uv_count": item.uv_count,
         "ratio": item.ratio,
     }
@@ -267,7 +319,7 @@ def _get_preview_sort_value(item, sort_by):
     if sort_by == 'TRIS':
         return item["tris"]
     if sort_by == 'MATS':
-        return item["material_count"]
+        return (item["material_count"], item.get("material_slot_count", item["material_count"]))
     if sort_by == 'UVS':
         return item["uv_count"]
     if sort_by == 'RATIO':
@@ -560,6 +612,26 @@ def refresh_active_check_result(context):
     return True
 
 
+def refresh_edit_mode_active_check_overlay(context):
+    scene = getattr(context, "scene", None)
+    settings = getattr(scene, "yl_omnihud_meshcheck", None) if scene is not None else None
+    if settings is None or settings.mode != 'CHECK' or not settings.show_overlay:
+        return False
+
+    active_object = _active_mesh_object(context)
+    if active_object is None or not getattr(getattr(active_object, "data", None), "is_editmode", False):
+        return False
+
+    visible_ids = get_visible_check_ids(settings)
+    matrix_signature = _get_matrix_signature(active_object.matrix_world)
+    prefs_signature = ",".join(visible_ids)
+    payload = _build_edit_mode_overlay_payload(context, active_object, visible_ids) if visible_ids else None
+
+    _store_edit_check_overlay_cache(active_object.name, matrix_signature, prefs_signature, payload)
+    _tag_view3d_redraw(context)
+    return True
+
+
 def refresh_edit_mode_active_check_result(context):
     scene = getattr(context, "scene", None)
     settings = getattr(scene, "yl_omnihud_meshcheck", None) if scene is not None else None
@@ -588,6 +660,17 @@ def refresh_edit_mode_active_check_result(context):
             finally:
                 if CHECK_LIST_SYNC_KEY in scene:
                     del scene[CHECK_LIST_SYNC_KEY]
+    else:
+        invalidate_geometry_memos(active_name)
+        updated_item = _check_result(context, active_object, None, detailed=False)
+        scene[CHECK_LIST_SYNC_KEY] = True
+        try:
+            entry = settings.check_results.add()
+            _assign_check_result_item(entry, updated_item)
+            settings.active_check_index = len(settings.check_results) - 1
+        finally:
+            if CHECK_LIST_SYNC_KEY in scene:
+                del scene[CHECK_LIST_SYNC_KEY]
 
     _store_edit_check_overlay_cache(active_name, matrix_signature, prefs_signature, payload)
     _tag_view3d_redraw(context)
@@ -611,6 +694,7 @@ def clear_preview_results(context):
         del scene[PREVIEW_REFRESH_SIGNATURE_KEY]
     RUNTIME_CACHE["preview_result_states"].clear()
     RUNTIME_CACHE["dirty_preview_objects"].clear()
+    _sync_meshcheck_depsgraph_handler(context)
 
 
 def clear_check_results(context):
@@ -632,6 +716,7 @@ def clear_check_results(context):
         del scene[CHECK_SCENE_DIRTY_KEY]
     RUNTIME_CACHE["check_result_states"].clear()
     RUNTIME_CACHE["dirty_check_objects"].clear()
+    _sync_meshcheck_depsgraph_handler(context)
 
 
 def _build_preview_results_incremental(context, depsgraph, objects, previous_results, previous_states, dirty_object_names=None):
@@ -676,9 +761,14 @@ def _build_check_results_incremental(
     results = []
     new_states = {}
     dirty_object_names = dirty_object_names or set()
+    check_inputs_signature = _get_check_inputs_signature(context)
 
     for obj in objects:
-        state_signature = _get_mesh_object_state_signature(obj)
+        state_signature = _get_check_result_state_signature(
+            context,
+            obj,
+            check_inputs_signature,
+        )
         new_states[obj.name] = state_signature
         item = previous_results.get(obj.name)
         if (
@@ -694,7 +784,7 @@ def _build_check_results_incremental(
     return results, new_states
 
 
-def run_preview(context):
+def run_preview(context, active_index_override=None):
     scene = getattr(context, "scene", None)
     settings = getattr(scene, "yl_omnihud_meshcheck", None) if scene is not None else None
     if settings is None:
@@ -727,10 +817,16 @@ def run_preview(context):
         )
 
         _sort_preview_results(results, settings)
-        _sync_results_to_settings(context, results, mode="preview")
+        _sync_results_to_settings(
+            context,
+            results,
+            mode="preview",
+            active_index_override=active_index_override,
+        )
         _store_preview_result_states(scene, result_states)
         scene[PREVIEW_REFRESH_SIGNATURE_KEY] = _get_meshcheck_refresh_signature(context, settings.scope, mode="preview")
         invalidate_preview_cache(context)
+        _sync_meshcheck_depsgraph_handler(context)
         return len(objects), len(results)
     finally:
         if RUNNING_PREVIEW_KEY in scene:
@@ -775,6 +871,7 @@ def run_check(context):
         scene[CHECK_REFRESH_SIGNATURE_KEY] = _get_meshcheck_refresh_signature(context, settings.scope, mode="check")
         scene[CHECK_SCENE_DIRTY_KEY] = False
         invalidate_check_cache(context)
+        _sync_meshcheck_depsgraph_handler(context)
         return len(objects), sum(1 for item in results if item["has_findings"])
     finally:
         if RUNNING_CHECK_KEY in scene:

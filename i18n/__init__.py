@@ -88,15 +88,8 @@ def pgettext(message):
 
 
 def register():
-    try:
-        bpy.app.translations.unregister(__package__)
-    except RuntimeError:
-        pass
     bpy.app.translations.register(__package__, TRANSLATIONS)
 
 
 def unregister():
-    try:
-        bpy.app.translations.unregister(__package__)
-    except RuntimeError:
-        pass
+    bpy.app.translations.unregister(__package__)

@@ -18,8 +18,12 @@ from .core.results import (
 from .core.runtime import tag_check_redraw, set_meshcheck_owner
 
 translate = bpy.app.translations.pgettext_iface
-DEFERRED_CHECK_REFRESH_INTERVAL = 0.08
-DEFERRED_CHECK_REFRESH_PENDING_KEY = "_yl_meshcheck_deferred_check_refresh_pending"
+
+
+def _sync_meshcheck_depsgraph_handler(context):
+    from .handlers import sync_depsgraph_handler_state
+
+    sync_depsgraph_handler_state(context)
 
 
 def _all_check_visibility_enabled(settings):
@@ -34,12 +38,6 @@ def _is_sortable_check_column(settings, sort_by):
     if definition is None:
         return False
     return getattr(settings, definition["show_prop"], False)
-
-
-def _ensure_scene_refresh_timer():
-    from .handlers import ensure_scene_refresh_timer
-
-    ensure_scene_refresh_timer()
 
 
 def refresh_meshcheck_results(context):
@@ -64,7 +62,6 @@ def refresh_meshcheck_results(context):
                 set_preview_owner(context)
             apply_heatmap(context, scope=scope)
             sync_preview_focus(context)
-            _ensure_scene_refresh_timer()
         return checked_count, ranked_count
 
     checked_count, problem_count = run_check(context)
@@ -72,52 +69,31 @@ def refresh_meshcheck_results(context):
         clear_check_results(context)
         if settings.show_overlay:
             settings.show_overlay = False
+        _sync_meshcheck_depsgraph_handler(context)
         return 0, 0
 
     if settings.show_overlay and getattr(getattr(context, "area", None), "type", None) == 'VIEW_3D':
         set_meshcheck_owner(context)
-    if settings.show_overlay:
-        _ensure_scene_refresh_timer()
+    _sync_meshcheck_depsgraph_handler(context)
     return checked_count, problem_count
 
 
-def _run_deferred_check_refresh():
-    context = bpy.context
+def refresh_check_results_if_needed(context):
     scene = getattr(context, "scene", None) if context is not None else None
     settings = getattr(scene, "yl_omnihud_meshcheck", None) if scene is not None else None
     if context is None or scene is None or settings is None:
-        return None
-
-    if not scene.get(DEFERRED_CHECK_REFRESH_PENDING_KEY):
-        return None
-    scene[DEFERRED_CHECK_REFRESH_PENDING_KEY] = False
+        return
 
     if settings.mode != 'CHECK':
-        return None
+        return
     if not settings.check_results and not settings.show_overlay:
-        return None
+        return
     if getattr(context, "mode", "") == 'EDIT_MESH':
-        return None
+        return
 
     checked_count, _problem_count = refresh_meshcheck_results(context)
     if checked_count <= 0:
         settings.show_overlay = False
-    return None
-
-
-def schedule_deferred_check_refresh(context):
-    scene = getattr(context, "scene", None)
-    if scene is None:
-        return
-
-    scene[DEFERRED_CHECK_REFRESH_PENDING_KEY] = True
-    if not bpy.app.timers.is_registered(_run_deferred_check_refresh):
-        bpy.app.timers.register(_run_deferred_check_refresh, first_interval=DEFERRED_CHECK_REFRESH_INTERVAL)
-
-
-def unregister_deferred_check_refresh():
-    if bpy.app.timers.is_registered(_run_deferred_check_refresh):
-        bpy.app.timers.unregister(_run_deferred_check_refresh)
 
 
 class YLOMNIHUD_OT_preview_meshcheck(bpy.types.Operator):
@@ -132,12 +108,16 @@ class YLOMNIHUD_OT_preview_meshcheck(bpy.types.Operator):
 
         if settings.mode == 'PREVIEW':
             if getattr(context, "mode", "") != 'OBJECT':
-                self.report({'WARNING'}, translate("Heatmap is available in Object Mode only"))
-                return {'CANCELLED'}
+                try:
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                except (AttributeError, RuntimeError):
+                    self.report({'WARNING'}, translate("Heatmap is available in Object Mode only"))
+                    return {'CANCELLED'}
             if settings.show_overlay:
                 settings.show_overlay = False
             if is_heatmap_active(context):
                 clear_heatmap(context)
+                _sync_meshcheck_depsgraph_handler(context)
                 return {'FINISHED'}
 
             heatmap_settings = getattr(context.scene, "yl_omnihud_heatmap", None)
@@ -149,18 +129,21 @@ class YLOMNIHUD_OT_preview_meshcheck(bpy.types.Operator):
             if count == 0:
                 clear_preview_results(context)
                 self.report({'WARNING'}, translate("No mesh objects found in the current scope"))
+                _sync_meshcheck_depsgraph_handler(context)
                 return {'CANCELLED'}
             sync_preview_focus(context)
-            _ensure_scene_refresh_timer()
+            _sync_meshcheck_depsgraph_handler(context)
             return {'FINISHED'}
 
         if settings.show_overlay and is_heatmap_active(context):
             settings.show_overlay = False
             clear_heatmap(context)
+            _sync_meshcheck_depsgraph_handler(context)
             return {'FINISHED'}
 
         if settings.show_overlay:
             settings.show_overlay = False
+            _sync_meshcheck_depsgraph_handler(context)
             return {'FINISHED'}
 
         if is_heatmap_active(context):
@@ -173,20 +156,24 @@ class YLOMNIHUD_OT_preview_meshcheck(bpy.types.Operator):
             if not refresh_edit_mode_active_check_result(context):
                 settings.show_overlay = False
                 self.report({'WARNING'}, translate("No mesh objects found in the current scope"))
+                _sync_meshcheck_depsgraph_handler(context)
                 return {'CANCELLED'}
+            _sync_meshcheck_depsgraph_handler(context)
             return {'FINISHED'}
 
         if can_reuse_check_results(context):
             sync_active_check_selection(context)
-            _ensure_scene_refresh_timer()
+            _sync_meshcheck_depsgraph_handler(context)
             return {'FINISHED'}
 
         checked_count, problem_count = refresh_meshcheck_results(context)
         if checked_count <= 0:
             settings.show_overlay = False
             self.report({'WARNING'}, translate("No mesh objects found in the current scope"))
+            _sync_meshcheck_depsgraph_handler(context)
             return {'CANCELLED'}
 
+        _sync_meshcheck_depsgraph_handler(context)
         return {'FINISHED'}
 
 

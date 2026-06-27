@@ -13,6 +13,7 @@ from .config import (
 from .results import (
     clear_check_results,
     clear_preview_results,
+    format_material_slot_value,
     get_active_check_object_name,
     get_active_check_overlay_data,
     get_active_preview_object_name,

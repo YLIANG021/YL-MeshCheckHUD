@@ -1,7 +1,7 @@
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, FloatVectorProperty
 
-from .core import ADDON_PACKAGE, tag_update_dirty
+from .core import ADDON_PACKAGE, ensure_update_timer, tag_update_dirty
 from ..i18n import pgettext
 from ..meshcheck.definitions import CHECK_DEFINITIONS
 
@@ -10,6 +10,11 @@ class RTD_Preferences(bpy.types.AddonPreferences):
     """Add-on preferences."""
 
     bl_idname = ADDON_PACKAGE
+
+    def _update_enable_display(self, context):
+        tag_update_dirty()
+        if self.enable_display:
+            ensure_update_timer(context)
 
     meshcheck_ngons_color: FloatVectorProperty(
         name="Ngons Color",
@@ -167,7 +172,7 @@ class RTD_Preferences(bpy.types.AddonPreferences):
         name="Enable Text HUD",
         description="Enable the text HUD",
         default=True,
-        update=lambda self, context: tag_update_dirty(),
+        update=_update_enable_display,
     )
 
     use_axis_colors: BoolProperty(
@@ -269,8 +274,6 @@ class RTD_Preferences(bpy.types.AddonPreferences):
         items=[
             ("RB", "Right Bottom", "Draw the overlay in the lower-right corner"),
             ("LB", "Left Bottom", "Draw the overlay in the lower-left corner"),
-            ("RT", "Right Top", "Draw the overlay in the upper-right corner"),
-            ("LT", "Left Top", "Draw the overlay in the upper-left corner"),
         ],
         default="RB",
         update=lambda self, context: tag_update_dirty(),
@@ -338,8 +341,6 @@ class RTD_Preferences(bpy.types.AddonPreferences):
             even_rows=True,
             align=True,
         )
-        position_grid.prop_enum(self, "ui_position", "LT", text=t("Left Top"))
-        position_grid.prop_enum(self, "ui_position", "RT", text=t("Right Top"))
         position_grid.prop_enum(self, "ui_position", "LB", text=t("Left Bottom"))
         position_grid.prop_enum(self, "ui_position", "RB", text=t("Right Bottom"))
 

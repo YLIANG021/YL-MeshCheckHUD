@@ -23,6 +23,13 @@ OWNER_AREA_KEY = "_yl_heatmap_owner_area"
 OWNER_REGION_KEY = "_yl_heatmap_owner_region"
 VIEWPORT_DISPLAY_STATE_KEY = "_yl_heatmap_viewport_display_states"
 MARKED_OBJECT_NAMES_KEY = "_yl_heatmap_marked_object_names"
+ACTIVE_SCENE_POINTERS = set()
+
+
+def _scene_pointer(scene):
+    if scene is None:
+        return 0
+    return int(scene.as_pointer())
 
 
 def _get_view3d_shading(context):
@@ -82,19 +89,52 @@ def _tag_view3d_redraw(context):
                 area.tag_redraw()
 
 
+def _safe_object_name(obj):
+    try:
+        return getattr(obj, "name", "")
+    except ReferenceError:
+        return ""
+
+
+def _safe_is_mesh_object(obj):
+    if obj is None:
+        return False
+    try:
+        return getattr(obj, "type", None) == 'MESH' and getattr(obj, "data", None) is not None
+    except ReferenceError:
+        return False
+
+
+def _safe_visible_get(obj):
+    try:
+        return bool(obj.visible_get())
+    except Exception:
+        return False
+
+
 def iter_mesh_objects(context, scope='ALL'):
     if scope == 'SELECTED':
         source = context.selected_objects
     elif scope == 'VISIBLE':
-        source = [obj for obj in context.view_layer.objects if obj.visible_get()]
+        source = [obj for obj in context.view_layer.objects if _safe_visible_get(obj)]
     else:
         source = context.view_layer.objects
 
-    return [obj for obj in source if obj.type == 'MESH' and obj.data is not None]
+    return [obj for obj in source if _safe_is_mesh_object(obj)]
 
 
 def iter_marked_mesh_objects(context):
-    return [obj for obj in context.view_layer.objects if obj.type == 'MESH' and obj.get(MARK_KEY)]
+    objects = []
+    for obj in context.view_layer.objects:
+        if not _safe_is_mesh_object(obj):
+            continue
+        try:
+            marked = obj.get(MARK_KEY)
+        except ReferenceError:
+            continue
+        if marked:
+            objects.append(obj)
+    return objects
 
 
 def get_complexity_value(obj, depsgraph=None):
@@ -208,6 +248,36 @@ def _clear_scene_preview_state(scene):
             del scene[key]
 
 
+def scene_needs_cleanup(scene):
+    if scene is None:
+        return False
+
+    scene_keys = (
+        ACTIVE_SCOPE_KEY,
+        SORTED_OBJECT_NAMES_KEY,
+        FOCUS_INDEX_KEY,
+        REFRESH_SIGNATURE_KEY,
+        COMPLEXITY_VALUES_KEY,
+        COMPLEXITY_TOTAL_KEY,
+        OBJECT_STATE_KEY,
+        SCOPE_OBJECT_NAMES_KEY,
+        OWNER_AREA_KEY,
+        OWNER_REGION_KEY,
+        SHADING_TYPE_KEY,
+        SHADING_COLOR_KEY,
+        VIEWPORT_DISPLAY_STATE_KEY,
+        MARKED_OBJECT_NAMES_KEY,
+    )
+    if any(key in scene for key in scene_keys):
+        return True
+
+    return any(
+        getattr(obj, "type", None) == 'MESH'
+        and (MARK_KEY in obj or COLOR_KEY in obj)
+        for obj in scene.objects
+    )
+
+
 def _iter_stored_marked_mesh_objects(context):
     scene = getattr(context, "scene", None)
     if scene is None:
@@ -221,13 +291,23 @@ def _iter_stored_marked_mesh_objects(context):
             continue
         seen_names.add(name)
         obj = bpy.data.objects.get(name)
-        if obj is not None and getattr(obj, "type", None) == 'MESH':
+        if _safe_is_mesh_object(obj):
             objects.append(obj)
 
     for obj in iter_marked_mesh_objects(context):
-        if obj.name in seen_names:
+        obj_name = _safe_object_name(obj)
+        if not obj_name or obj_name in seen_names:
             continue
-        seen_names.add(obj.name)
+        seen_names.add(obj_name)
+        objects.append(obj)
+
+    for obj in scene.objects:
+        obj_name = _safe_object_name(obj)
+        if not obj_name or not _safe_is_mesh_object(obj) or obj_name in seen_names:
+            continue
+        if MARK_KEY not in obj and COLOR_KEY not in obj:
+            continue
+        seen_names.add(obj_name)
         objects.append(obj)
 
     return objects
@@ -328,6 +408,32 @@ def _color_from_ratio(ratio, low_hue=0.66, high_hue=0.0):
     return (color.r, color.g, color.b, 1.0)
 
 
+def _get_material_uv_signature(obj, mesh):
+    if mesh is None:
+        return (), 0, 0
+
+    try:
+        material_signature = tuple(
+            int(material.as_pointer())
+            for material in getattr(mesh, "materials", ())
+            if material is not None
+        )
+    except Exception:
+        material_signature = ()
+
+    try:
+        uv_count = len(getattr(mesh, "uv_layers", ()))
+    except Exception:
+        uv_count = 0
+
+    try:
+        material_slot_count = len(getattr(obj, "material_slots", ()))
+    except Exception:
+        material_slot_count = 0
+
+    return material_signature, material_slot_count, uv_count
+
+
 def _get_object_state(obj, depsgraph=None):
     try:
         is_visible = bool(obj.visible_get())
@@ -350,6 +456,8 @@ def _get_object_state(obj, depsgraph=None):
     except Exception:
         evaluated_tris = 0
 
+    material_signature, material_slot_count, uv_count = _get_material_uv_signature(obj, mesh)
+
     return "|".join(
         (
             str(int(obj.as_pointer())),
@@ -359,6 +467,9 @@ def _get_object_state(obj, depsgraph=None):
             str(edge_count),
             str(poly_count),
             str(evaluated_tris),
+            repr(material_signature),
+            str(material_slot_count),
+            str(uv_count),
         )
     )
 
@@ -409,7 +520,11 @@ def get_sorted_preview_objects(context):
     objects = []
     for name in names:
         obj = context.view_layer.objects.get(name)
-        if obj is not None and obj.type == 'MESH' and obj.get(MARK_KEY):
+        try:
+            marked = obj.get(MARK_KEY) if _safe_is_mesh_object(obj) else False
+        except ReferenceError:
+            marked = False
+        if marked:
             objects.append(obj)
     return objects
 
@@ -498,7 +613,11 @@ def sync_focused_object_selection(context):
 
 
 def is_heatmap_active(context, scope=None):
-    scene = context.scene
+    scene = getattr(context, "scene", None)
+    if scene is None:
+        return False
+    if _scene_pointer(scene) not in ACTIVE_SCENE_POINTERS:
+        return False
     active_scope = scene.get(ACTIVE_SCOPE_KEY)
     if not active_scope:
         return False
@@ -567,6 +686,7 @@ def apply_heatmap(context, scope='ALL', precomputed_values=None, preserve_focus=
 
     _enable_object_color_display(context)
     scene[ACTIVE_SCOPE_KEY] = scope
+    ACTIVE_SCENE_POINTERS.add(_scene_pointer(scene))
     sorted_names = [obj.name for obj, _value in values]
     scene[SORTED_OBJECT_NAMES_KEY] = sorted_names
     if preserve_focus and previous_focus_name in sorted_names:
@@ -587,6 +707,9 @@ def apply_heatmap(context, scope='ALL', precomputed_values=None, preserve_focus=
 
     scene[REFRESH_SIGNATURE_KEY] = _build_signature_from_states(current_states)
     _tag_view3d_redraw(context)
+    from .handlers import sync_heatmap_update_timer_state
+
+    sync_heatmap_update_timer_state(context)
     return len(values)
 
 
@@ -597,8 +720,12 @@ def clear_heatmap(context, scope=None):
         _restore_original_color(obj)
 
     _clear_scene_preview_state(context.scene)
+    ACTIVE_SCENE_POINTERS.discard(_scene_pointer(context.scene))
     _restore_viewport_display(context)
     _tag_view3d_redraw(context)
+    from .handlers import sync_heatmap_update_timer_state
+
+    sync_heatmap_update_timer_state(context)
 
 
 def refresh_heatmap(context):
@@ -606,6 +733,11 @@ def refresh_heatmap(context):
     if settings is None or not is_heatmap_active(context):
         return
 
+    from ..meshcheck.core import run_preview
+
+    meshcheck_settings = getattr(context.scene, "yl_omnihud_meshcheck", None)
+    active_preview_index = getattr(meshcheck_settings, "active_preview_index", None)
+    run_preview(context, active_index_override=active_preview_index)
     scope = settings.scope
     apply_heatmap(context, scope=scope, preserve_focus=True)
 

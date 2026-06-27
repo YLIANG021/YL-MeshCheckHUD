@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yl_meshcheckhud"
-version = "1.0.0"
+version = "1.1.0"
 name = "YL MeshCheckHUD"
 tagline = "Mesh check, heatmap, and live HUD tools for Blender"
 maintainer = "YLIANG"
@@ -9,7 +9,7 @@ website = "https://github.com/YLIANG021/YL-MeshCheckHUD"
 type = "add-on"
 
 blender_version_min = "4.2.0"
-blender_version_max = "5.2.0"
+blender_version_max = "5.3.0"
 
 license = [
   "SPDX:GPL-3.0-or-later",

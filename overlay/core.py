@@ -1,4 +1,5 @@
 import logging
+import time
 
 import bmesh
 import bpy
@@ -14,6 +15,9 @@ DEFAULT_HIGH_POLY_FACE_LIMIT = 100000
 UNAPPLIED_SCALE_EPSILON = 0.001
 OBJECT_UPDATE_INTERVAL = 0.05
 EDIT_UPDATE_INTERVAL = 0.1
+EDIT_GEOMETRY_SIGNATURE_INTERVAL = 0.25
+EDIT_GEOMETRY_SIGNATURE_MAX_SCAN = 4096
+EDIT_GEOMETRY_SIGNATURE_DIGITS = 2
 
 
 CACHE = {
@@ -22,6 +26,9 @@ CACHE = {
     "text_signature": None,
     "is_calculating": False,
     "needs_update": False,
+    "edit_trigger_signature": None,
+    "edit_geometry_signature": None,
+    "edit_geometry_signature_time": 0.0,
 }
 
 
@@ -134,6 +141,125 @@ def _get_overlay_meshes(context):
             return [focused]
 
     return []
+
+
+def _get_edit_trigger_signature(context):
+    """Return a lightweight edit-mode change signature without touching BMesh."""
+    selected_meshes = _get_overlay_meshes(context)
+    view_layer = getattr(context, "view_layer", None)
+    active_object = getattr(view_layer.objects, "active", None) if view_layer is not None else None
+    active_name = active_object.name if active_object is not None else ""
+    object_parts = []
+
+    for obj in selected_meshes:
+        mesh = getattr(obj, "data", None)
+        if mesh is None:
+            continue
+        try:
+            mesh_pointer = int(mesh.as_pointer())
+        except (ReferenceError, RuntimeError, TypeError, ValueError):
+            mesh_pointer = 0
+        object_parts.append(
+            (
+                obj.name,
+                mesh_pointer,
+                len(getattr(mesh, "vertices", ())),
+                len(getattr(mesh, "edges", ())),
+                len(getattr(mesh, "polygons", ())),
+                int(getattr(mesh, "total_vert_sel", -1)),
+                int(getattr(mesh, "total_edge_sel", -1)),
+                int(getattr(mesh, "total_face_sel", -1)),
+            )
+        )
+
+    return (getattr(context, "mode", ""), active_name, tuple(sorted(object_parts)))
+
+
+def _has_edit_trigger_changed(context):
+    signature = _get_edit_trigger_signature(context)
+    previous_signature = CACHE.get("edit_trigger_signature")
+    CACHE["edit_trigger_signature"] = signature
+    return signature != previous_signature
+
+
+def _quantized_coord_signature(co):
+    return (
+        round(co.x, EDIT_GEOMETRY_SIGNATURE_DIGITS),
+        round(co.y, EDIT_GEOMETRY_SIGNATURE_DIGITS),
+        round(co.z, EDIT_GEOMETRY_SIGNATURE_DIGITS),
+    )
+
+
+def _get_edit_geometry_probe_signature(context):
+    """Return a cheap sampled selected-geometry signature for edit-mode dimensions."""
+    object_parts = []
+    selected_meshes = _get_overlay_meshes(context)
+
+    for obj in selected_meshes:
+        mesh = getattr(obj, "data", None)
+        if mesh is None or not getattr(mesh, "is_editmode", False):
+            continue
+        try:
+            bm = bmesh.from_edit_mesh(mesh)
+        except (AttributeError, ReferenceError, RuntimeError, ValueError):
+            return None
+
+        selected_count = 0
+        first = None
+        middle = None
+        last = None
+        coord_sum = Vector((0.0, 0.0, 0.0))
+
+        for vert in bm.verts:
+            if not vert.select:
+                continue
+            selected_count += 1
+            coord = vert.co
+            if first is None:
+                first = coord.copy()
+            if selected_count == (EDIT_GEOMETRY_SIGNATURE_MAX_SCAN // 2):
+                middle = coord.copy()
+            last = coord.copy()
+            coord_sum.x += coord.x
+            coord_sum.y += coord.y
+            coord_sum.z += coord.z
+            if selected_count >= EDIT_GEOMETRY_SIGNATURE_MAX_SCAN:
+                break
+
+        if selected_count <= 0:
+            object_parts.append((obj.name, 0))
+            continue
+
+        if middle is None:
+            middle = last
+
+        object_parts.append(
+            (
+                obj.name,
+                selected_count,
+                _quantized_coord_signature(first),
+                _quantized_coord_signature(middle),
+                _quantized_coord_signature(last),
+                _quantized_coord_signature(coord_sum),
+            )
+        )
+
+    return tuple(sorted(object_parts))
+
+
+def _has_edit_geometry_probe_changed(context):
+    now = time.monotonic()
+    if now - CACHE.get("edit_geometry_signature_time", 0.0) < EDIT_GEOMETRY_SIGNATURE_INTERVAL:
+        return False
+
+    CACHE["edit_geometry_signature_time"] = now
+    signature = _get_edit_geometry_probe_signature(context)
+    if signature is None:
+        return False
+
+    previous_signature = CACHE.get("edit_geometry_signature")
+    CACHE["edit_geometry_signature"] = signature
+    return signature != previous_signature
 
 
 def _has_any_selection(bm):
@@ -374,7 +500,7 @@ def deferred_update():
     context = bpy.context
     if not context:
         CACHE["needs_update"] = False
-        return None
+        return OBJECT_UPDATE_INTERVAL
 
     interval = _get_update_interval(context)
 
@@ -387,17 +513,23 @@ def deferred_update():
     if CACHE["is_calculating"]:
         return interval
 
-    # Edit-mode element selection changes do not reliably trigger depsgraph updates,
-    # so keep the HUD refreshed on a lightweight timer while it is enabled.
-    CACHE["needs_update"] = True
+    mode = getattr(context, "mode", "")
+    if mode == "OBJECT":
+        CACHE["edit_trigger_signature"] = None
+        CACHE["edit_geometry_signature"] = None
+        CACHE["edit_geometry_signature_time"] = 0.0
+        CACHE["needs_update"] = True
+    elif mode == "EDIT_MESH" and not CACHE["needs_update"]:
+        if _has_edit_trigger_changed(context) or _has_edit_geometry_probe_changed(context):
+            CACHE["needs_update"] = True
 
-    update_data()
+    if CACHE["needs_update"]:
+        update_data()
     return interval
 
 
-@bpy.app.handlers.persistent
 def tag_update_dirty(scene=None, depsgraph=None):
-    """Mark cached data dirty and schedule a refresh."""
+    """Mark cached data dirty."""
     del scene
     del depsgraph
     context = bpy.context
@@ -411,7 +543,9 @@ def tag_update_dirty(scene=None, depsgraph=None):
 
     CACHE["needs_update"] = True
 
-    if CACHE["is_calculating"]:
-        return
+
+def ensure_update_timer(context=None):
+    if context is None:
+        context = bpy.context
     if not bpy.app.timers.is_registered(deferred_update):
-        bpy.app.timers.register(deferred_update, first_interval=_get_update_interval(context))
+        bpy.app.timers.register(deferred_update, first_interval=_get_update_interval(context), persistent=True)

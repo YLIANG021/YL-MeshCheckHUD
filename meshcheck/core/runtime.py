@@ -114,9 +114,7 @@ def _empty_overlay_payload():
         "ngon_faces": [],
         "double_points": [],
         "long_tri_segments": [],
-        "long_tri_faces": [],
         "tiny_face_points": [],
-        "tiny_face_faces": [],
         "pole_points": [],
         "isolated_points": [],
         "non_manifold_segments": [],
@@ -151,6 +149,9 @@ def _store_edit_check_overlay_cache(object_name, matrix_signature, prefs_signatu
             prefs_signature,
             CHECK_CACHE["edit_version"],
         )
+        CHECK_CACHE["edit_quick_signature"] = data.get("_edit_topology_signature", ())
+    else:
+        CHECK_CACHE["edit_quick_signature"] = ()
     CHECK_CACHE["edit_object_name"] = object_name
     CHECK_CACHE["edit_matrix_signature"] = matrix_signature
     CHECK_CACHE["edit_prefs_signature"] = prefs_signature

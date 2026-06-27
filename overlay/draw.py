@@ -156,16 +156,10 @@ def draw_callback_px():
     total_width = max(main_width, secondary_width)
     total_height = layout["h"] + (line_gap + secondary_line_height if has_secondary_line else 0)
 
-    if position == "RB":
-        x = region.width - total_width - margin_x - pad
-    elif position == "LB":
+    if position == "LB":
         x = margin_x + pad
-    elif position == "RT":
+    else:
         x = region.width - total_width - margin_x - pad
-        y = region.height - margin_y - total_height - pad
-    elif position == "LT":
-        x = margin_x + pad
-        y = region.height - margin_y - total_height - pad
 
     x = max(pad, x)
     y = max(pad, y)

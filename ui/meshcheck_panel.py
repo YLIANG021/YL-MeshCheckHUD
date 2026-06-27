@@ -2,7 +2,9 @@ import bpy
 
 from ..heatmap.logic import is_heatmap_active
 from ..i18n import pgettext
+from ..meshcheck.core import format_material_slot_value
 from ..meshcheck.definitions import CHECK_DEFINITIONS, get_check_definition
+from .check_detail import draw_check_detail, get_check_detail_title, should_draw_check_detail
 from .icons import get_check_icon_fallback, get_check_icon_value
 
 translate = bpy.app.translations.pgettext_iface
@@ -12,7 +14,7 @@ PREVIEW_COLUMNS = (
     ("NAME", "Object", 0.28),
     ("TRIS", "Tris", 0.20),
     ("RATIO", "%", 0.20),
-    ("MATS", "Mats", 0.16),
+    ("MATS", "Mats/Slots", 0.16),
     ("UVS", "UVs", 0.16),
 )
 
@@ -276,7 +278,9 @@ def _draw_advanced_settings(container, settings):
         body.row().prop(settings, "missing_sharp_skip_marked")
 
 
-def _check_value(item, column_id):
+def _check_value(item, column_id, enabled=True):
+    if not enabled:
+        return "—"
     if column_id == "NGONS":
         return str(item.ngon_count)
     if column_id == "DOUBLES":
@@ -311,9 +315,9 @@ class YLOMNIHUD_UL_preview_results(bpy.types.UIList):
             elif column_id == "TRIS":
                 cell.label(text=f"{item.tris:,}")
             elif column_id == "RATIO":
-                cell.label(text=f"{item.ratio * 100.0:.1f}%")
+                cell.label(text=f"{item.ratio * 100.0:.1f}")
             elif column_id == "MATS":
-                cell.label(text=str(item.material_count))
+                cell.label(text=format_material_slot_value(item))
             elif column_id == "UVS":
                 cell.label(text=str(item.uv_count))
 
@@ -335,9 +339,9 @@ class YLOMNIHUD_UL_check_results(bpy.types.UIList):
                 cell.label(text=item.object_name, translate=False)
             else:
                 definition = get_check_definition(column_id)
-                cell.enabled = getattr(data, definition["show_prop"], False)
+                enabled = getattr(data, definition["show_prop"], False)
                 cell.alignment = 'CENTER'
-                cell.label(text=_check_value(item, column_id))
+                cell.label(text=_check_value(item, column_id, enabled=enabled))
 
         _draw_split_cells(row, columns, draw_cell)
 
@@ -365,7 +369,6 @@ class YLOMNIHUD_PT_meshcheck(bpy.types.Panel):
         action_row = layout.row(align=True)
         action_row.scale_y = 1.6
         preview_button = action_row.row(align=True)
-        preview_button.enabled = is_object_mode or check_settings.mode != 'PREVIEW'
         preview_button.operator(
             "yl_omnihud.preview_meshcheck",
             text=translate("Preview"),
@@ -384,7 +387,7 @@ class YLOMNIHUD_PT_meshcheck(bpy.types.Panel):
 
         mode_row = layout.row(align=True)
         preview_mode_button = mode_row.row(align=True)
-        preview_mode_button.enabled = hud_active and is_object_mode
+        preview_mode_button.enabled = hud_active
         preview_mode_button.prop_enum(
             check_settings,
             "mode",
@@ -424,10 +427,16 @@ class YLOMNIHUD_PT_meshcheck(bpy.types.Panel):
                 box.label(text=translate("Enable HUD to generate results."), icon='INFO')
         else:
             box = layout.box()
-            box.label(text=translate("Check Results"))
-            _draw_check_picker(box, check_settings)
-            _draw_check_visibility_toggles(box, check_settings)
-            if check_settings.check_results:
+            is_check_detail = should_draw_check_detail(context, check_settings)
+            if is_check_detail:
+                box.label(text=get_check_detail_title(context), translate=False)
+            else:
+                box.label(text=translate("Check Results"))
+                _draw_check_picker(box, check_settings)
+                _draw_check_visibility_toggles(box, check_settings)
+            if is_check_detail:
+                draw_check_detail(box, context, check_settings)
+            elif check_settings.check_results:
                 box.template_list(
                     "YLOMNIHUD_UL_check_results",
                     "",

@@ -36,9 +36,6 @@ def _icons_dir():
 
 def register():
     global _icon_collection
-    if _icon_collection is not None:
-        return
-
     collection = bpy.utils.previews.new()
     icons_dir = _icons_dir()
     for key, filename in CHECK_ICON_FILES.items():
@@ -50,10 +47,9 @@ def register():
 
 def unregister():
     global _icon_collection
-    if _icon_collection is None:
-        return
-    bpy.utils.previews.remove(_icon_collection)
-    _icon_collection = None
+    if _icon_collection is not None:
+        bpy.utils.previews.remove(_icon_collection)
+        _icon_collection = None
 
 
 def get_check_icon_value(check_id, enabled=True):

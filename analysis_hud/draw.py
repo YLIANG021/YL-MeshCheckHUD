@@ -53,18 +53,11 @@ def _resolve_position(region, prefs, total_width, total_height, pad):
     margin_y = prefs.ui_y_offset
     position = prefs.ui_position
 
-    x = 0.0
     y = float(margin_y + pad)
-    if position == "RB":
-        x = region.width - total_width - margin_x - pad
-    elif position == "LB":
+    if position == "LB":
         x = margin_x + pad
-    elif position == "RT":
+    else:
         x = region.width - total_width - margin_x - pad
-        y = region.height - margin_y - total_height - pad
-    elif position == "LT":
-        x = margin_x + pad
-        y = region.height - margin_y - total_height - pad
 
     return max(pad, x), max(pad, y)
 

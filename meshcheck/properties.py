@@ -6,6 +6,7 @@ from .core.results import (
     can_reuse_check_results,
     clear_check_results,
     clear_preview_results,
+    refresh_edit_mode_active_check_overlay,
     refresh_edit_mode_active_check_result,
     run_check,
     run_preview,
@@ -14,7 +15,7 @@ from .core.results import (
     sync_active_preview_selection,
     sync_preview_focus,
 )
-from .operators import schedule_deferred_check_refresh
+from .operators import refresh_check_results_if_needed
 from .core.runtime import (
     CHECK_LIST_SYNC_KEY,
     invalidate_check_cache,
@@ -34,6 +35,10 @@ from ..overlay.core import get_prefs
 
 
 EDIT_MODE_REALTIME_TRI_LIMIT_DEFAULT = 25000
+DEFERRED_CHECK_THRESHOLD_UPDATE_INTERVAL = 0.15
+DEFERRED_CHECK_THRESHOLD_UPDATE_STATE = {
+    "dirty": False,
+}
 
 
 def _is_syncing(context):
@@ -45,8 +50,10 @@ def _is_syncing(context):
     return bool(scene.get(PREVIEW_LIST_SYNC_KEY) or scene.get(CHECK_LIST_SYNC_KEY))
 
 
-def _restore_viewport_overlay_state(context):
-    del context
+def _sync_meshcheck_depsgraph_handler(context):
+    from .handlers import sync_depsgraph_handler_state
+
+    sync_depsgraph_handler_state(context)
 
 
 def _get_edit_mode_realtime_tri_limit():
@@ -123,33 +130,79 @@ def _should_refresh_edit_mode_check_realtime(context):
     return _estimate_active_mesh_triangle_count(context) <= _get_edit_mode_realtime_tri_limit()
 
 
-def _ensure_scene_refresh_timer():
-    from .handlers import ensure_scene_refresh_timer
+def _clear_deferred_check_threshold_update_state():
+    DEFERRED_CHECK_THRESHOLD_UPDATE_STATE["dirty"] = False
 
-    ensure_scene_refresh_timer()
+
+def _ensure_deferred_check_threshold_update_timer():
+    if not bpy.app.timers.is_registered(process_deferred_check_threshold_update):
+        bpy.app.timers.register(
+            process_deferred_check_threshold_update,
+            first_interval=DEFERRED_CHECK_THRESHOLD_UPDATE_INTERVAL,
+        )
+
+
+def _queue_deferred_check_threshold_update():
+    DEFERRED_CHECK_THRESHOLD_UPDATE_STATE["dirty"] = True
+    _ensure_deferred_check_threshold_update_timer()
+
+
+def _process_check_threshold_update(context):
+    settings = getattr(getattr(context, "scene", None), "yl_omnihud_meshcheck", None) if context is not None else None
+    if settings is not None:
+        if (
+            context is not None
+            and getattr(context, "mode", "") == 'EDIT_MESH'
+            and settings.mode == 'CHECK'
+            and settings.show_overlay
+            and _should_refresh_edit_mode_check_realtime(context)
+        ):
+            refresh_edit_mode_active_check_result(context)
+            return
+        _refresh_check_results_if_needed(settings, context)
+    invalidate_check_cache(context)
+
+
+def process_deferred_check_threshold_update():
+    if not DEFERRED_CHECK_THRESHOLD_UPDATE_STATE["dirty"]:
+        return None
+
+    _clear_deferred_check_threshold_update_state()
+    _process_check_threshold_update(bpy.context)
+    if DEFERRED_CHECK_THRESHOLD_UPDATE_STATE["dirty"]:
+        return DEFERRED_CHECK_THRESHOLD_UPDATE_INTERVAL
+    return None
+
+
+def unregister_deferred_check_threshold_update():
+    if bpy.app.timers.is_registered(process_deferred_check_threshold_update):
+        bpy.app.timers.unregister(process_deferred_check_threshold_update)
+    _clear_deferred_check_threshold_update_state()
 
 
 def _update_scope(self, context):
     if _is_syncing(context):
         return
-    if self.mode == 'PREVIEW':
-        checked_count, _ranked_count = run_preview(context)
-        if is_heatmap_active(context):
-            heatmap_settings = getattr(context.scene, "yl_omnihud_heatmap", None)
-            if heatmap_settings is not None:
-                heatmap_settings.scope = self.scope
-            if checked_count > 0:
-                apply_heatmap(context, scope=self.scope)
-                sync_preview_focus(context)
-                _ensure_scene_refresh_timer()
-            else:
-                clear_heatmap(context)
-                clear_preview_results(context)
-    else:
-        checked_count, _problem_count = run_check(context)
-        if checked_count == 0:
-            clear_check_results(context)
-            self.show_overlay = False
+    try:
+        if self.mode == 'PREVIEW':
+            checked_count, _ranked_count = run_preview(context)
+            if is_heatmap_active(context):
+                heatmap_settings = getattr(context.scene, "yl_omnihud_heatmap", None)
+                if heatmap_settings is not None:
+                    heatmap_settings.scope = self.scope
+                if checked_count > 0:
+                    apply_heatmap(context, scope=self.scope)
+                    sync_preview_focus(context)
+                else:
+                    clear_heatmap(context)
+                    clear_preview_results(context)
+        else:
+            checked_count, _problem_count = run_check(context)
+            if checked_count == 0:
+                clear_check_results(context)
+                self.show_overlay = False
+    finally:
+        _sync_meshcheck_depsgraph_handler(context)
 
 
 def _update_overlay_visibility(self, context):
@@ -157,6 +210,7 @@ def _update_overlay_visibility(self, context):
         return
     invalidate_preview_cache(context)
     tag_check_redraw(context)
+    _sync_meshcheck_depsgraph_handler(context)
 
 
 def _update_mode(self, context):
@@ -165,54 +219,57 @@ def _update_mode(self, context):
     if context is None:
         invalidate_preview_cache(context)
         tag_check_redraw(context)
+        _sync_meshcheck_depsgraph_handler(context)
         return
     if getattr(context, "mode", "") == 'EDIT_MESH' and self.mode == 'PREVIEW':
-        invalidate_preview_cache(context)
-        tag_check_redraw(context)
-        return
+        try:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        except (AttributeError, RuntimeError):
+            invalidate_preview_cache(context)
+            tag_check_redraw(context)
+            _sync_meshcheck_depsgraph_handler(context)
+            return
 
-    hud_active = is_heatmap_active(context) or self.show_overlay
-    if hud_active:
-        if self.mode == 'PREVIEW':
-            _restore_viewport_overlay_state(context)
-            if self.show_overlay:
-                self.show_overlay = False
-            heatmap_settings = getattr(context.scene, "yl_omnihud_heatmap", None)
-            if heatmap_settings is not None:
-                heatmap_settings.scope = self.scope
-            set_preview_owner(context)
+    try:
+        hud_active = is_heatmap_active(context) or self.show_overlay
+        if hud_active:
+            if self.mode == 'PREVIEW':
+                if self.show_overlay:
+                    self.show_overlay = False
+                heatmap_settings = getattr(context.scene, "yl_omnihud_heatmap", None)
+                if heatmap_settings is not None:
+                    heatmap_settings.scope = self.scope
+                set_preview_owner(context)
 
-            if self.preview_results and apply_heatmap(context, scope=self.scope) > 0:
-                sync_preview_focus(context)
-                invalidate_preview_cache(context)
-            else:
-                checked_count, _ranked_count = run_preview(context)
-                if checked_count > 0 and apply_heatmap(context, scope=self.scope) > 0:
+                if self.preview_results and apply_heatmap(context, scope=self.scope) > 0:
                     sync_preview_focus(context)
                     invalidate_preview_cache(context)
                 else:
-                    clear_heatmap(context)
-                    clear_preview_results(context)
-        else:
-            if is_heatmap_active(context):
-                clear_heatmap(context)
-            set_meshcheck_owner(context)
-            if can_reuse_check_results(context):
-                self.show_overlay = True
-                sync_active_check_selection(context)
-                tag_check_redraw(context)
-                _ensure_scene_refresh_timer()
+                    checked_count, _ranked_count = run_preview(context)
+                    if checked_count > 0 and apply_heatmap(context, scope=self.scope) > 0:
+                        sync_preview_focus(context)
+                        invalidate_preview_cache(context)
+                    else:
+                        clear_heatmap(context)
+                        clear_preview_results(context)
             else:
-                checked_count, _problem_count = run_check(context)
-                self.show_overlay = checked_count > 0
-                if self.show_overlay:
-                    _ensure_scene_refresh_timer()
-                if checked_count == 0:
-                    clear_check_results(context)
-    else:
-        _restore_viewport_overlay_state(context)
-        invalidate_preview_cache(context)
-        tag_check_redraw(context)
+                if is_heatmap_active(context):
+                    clear_heatmap(context)
+                set_meshcheck_owner(context)
+                if can_reuse_check_results(context):
+                    self.show_overlay = True
+                    sync_active_check_selection(context)
+                    tag_check_redraw(context)
+                else:
+                    checked_count, _problem_count = run_check(context)
+                    self.show_overlay = checked_count > 0
+                    if checked_count == 0:
+                        clear_check_results(context)
+        else:
+            invalidate_preview_cache(context)
+            tag_check_redraw(context)
+    finally:
+        _sync_meshcheck_depsgraph_handler(context)
 
 
 def _update_preview_sort(self, context):
@@ -260,7 +317,15 @@ def _refresh_check_results_if_needed(settings, context):
     if not settings.check_results and not settings.show_overlay:
         return
 
-    schedule_deferred_check_refresh(context)
+    refresh_check_results_if_needed(context)
+
+
+def _refresh_edit_check_results_if_needed(settings, context):
+    if context is None or getattr(context, "mode", "") != 'EDIT_MESH':
+        return False
+    if settings.mode != 'CHECK' or not settings.show_overlay:
+        return False
+    return refresh_edit_mode_active_check_result(context)
 
 
 def _update_check_visibility(self, context):
@@ -287,28 +352,30 @@ def _update_check_visibility(self, context):
         for definition in CHECK_DEFINITIONS
         if definition["id"] in current_enabled_ids
     )
+    refreshed_edit_cache = False
     if not skip_batched_refresh:
-        _refresh_check_results_if_needed(self, context)
-    invalidate_check_cache(context)
+        refreshed_edit_cache = _refresh_edit_check_results_if_needed(self, context)
+        if not refreshed_edit_cache:
+            _refresh_check_results_if_needed(self, context)
+    invalidate_check_cache(context, edit_cache=not refreshed_edit_cache)
+
+
+def _update_check_display_visibility(self, context):
+    if _is_syncing(context):
+        return
+
+    refreshed_edit_cache = False
+    if context is not None and getattr(context, "mode", "") == 'EDIT_MESH':
+        if self.mode == 'CHECK' and self.show_overlay:
+            refreshed_edit_cache = refresh_edit_mode_active_check_overlay(context)
+    invalidate_check_cache(context, edit_cache=not refreshed_edit_cache)
 
 
 def _update_check_thresholds(self, context):
     del self
     if _is_syncing(context):
         return
-    settings = getattr(getattr(context, "scene", None), "yl_omnihud_meshcheck", None) if context is not None else None
-    if settings is not None:
-        if (
-            context is not None
-            and getattr(context, "mode", "") == 'EDIT_MESH'
-            and settings.mode == 'CHECK'
-            and settings.show_overlay
-            and _should_refresh_edit_mode_check_realtime(context)
-        ):
-            refresh_edit_mode_active_check_result(context)
-            return
-        _refresh_check_results_if_needed(settings, context)
-    invalidate_check_cache(context)
+    _queue_deferred_check_threshold_update()
 
 
 def _get_show_all_checks(self):
@@ -367,6 +434,7 @@ class YLOMNIHUD_PreviewResultItem(bpy.types.PropertyGroup):
     object_name: StringProperty()
     tris: IntProperty(default=0, min=0)
     material_count: IntProperty(default=0, min=0)
+    material_slot_count: IntProperty(default=0, min=0)
     uv_count: IntProperty(default=0, min=0)
     ratio: FloatProperty(default=0.0, min=0.0, max=1.0)
 
@@ -394,6 +462,7 @@ class YLOMNIHUD_MeshCheckSettings(bpy.types.PropertyGroup):
         ],
         default='PREVIEW',
         update=_update_mode,
+        options={'SKIP_SAVE'},
     )
     scope: EnumProperty(
         name="Scope",
@@ -404,11 +473,13 @@ class YLOMNIHUD_MeshCheckSettings(bpy.types.PropertyGroup):
         ],
         default='VISIBLE',
         update=_update_scope,
+        options={'SKIP_SAVE'},
     )
     show_overlay: BoolProperty(
         name="Show Overlay",
         default=False,
         update=_update_overlay_visibility,
+        options={'SKIP_SAVE'},
     )
     check_use_xray: BoolProperty(
         name="X-Ray Check Overlay",
@@ -428,14 +499,14 @@ class YLOMNIHUD_MeshCheckSettings(bpy.types.PropertyGroup):
     show_all_checks: BoolProperty(name="All Checks", get=_get_show_all_checks, set=_set_show_all_checks)
     check_visibility_restore_state: StringProperty(default="", options={'HIDDEN', 'SKIP_SAVE'})
     show_advanced: BoolProperty(name="Advanced", default=False)
-    show_ngons_column: BoolProperty(name="Ngons", default=True)
-    show_doubles_column: BoolProperty(name="Doubles", default=True)
-    show_isolated_verts_column: BoolProperty(name="Isolated", default=True)
-    show_long_tris_column: BoolProperty(name="Needle Tris", default=True)
-    show_tiny_faces_column: BoolProperty(name="Tiny Faces", default=True)
-    show_poles_column: BoolProperty(name="Poles", default=True)
-    show_non_manifold_column: BoolProperty(name="Non-manifold", default=True)
-    show_missing_sharp_column: BoolProperty(name="Sharp", default=True)
+    show_ngons_column: BoolProperty(name="Ngons", default=True, update=_update_check_display_visibility)
+    show_doubles_column: BoolProperty(name="Doubles", default=True, update=_update_check_display_visibility)
+    show_isolated_verts_column: BoolProperty(name="Isolated", default=True, update=_update_check_display_visibility)
+    show_long_tris_column: BoolProperty(name="Needle Tris", default=True, update=_update_check_display_visibility)
+    show_tiny_faces_column: BoolProperty(name="Tiny Faces", default=True, update=_update_check_display_visibility)
+    show_poles_column: BoolProperty(name="Poles", default=True, update=_update_check_display_visibility)
+    show_non_manifold_column: BoolProperty(name="Non-manifold", default=True, update=_update_check_display_visibility)
+    show_missing_sharp_column: BoolProperty(name="Sharp", default=True, update=_update_check_display_visibility)
     doubles_distance: FloatProperty(
         name="Doubles Distance",
         default=0.0001,
@@ -473,7 +544,7 @@ class YLOMNIHUD_MeshCheckSettings(bpy.types.PropertyGroup):
     )
     missing_sharp_angle: FloatProperty(
         name="Sharp Angle",
-        default=90.0,
+        default=89.0,
         min=0.0,
         max=180.0,
         precision=1,
@@ -491,7 +562,7 @@ class YLOMNIHUD_MeshCheckSettings(bpy.types.PropertyGroup):
         items=[
             ('TRIS', "Tris", "Sort by triangle count"),
             ('RATIO', "Ratio", "Sort by triangle ratio"),
-            ('MATS', "Mats", "Sort by material count"),
+            ('MATS', "Mats/Slots", "Sort by material and slot count"),
             ('UVS', "UVs", "Sort by UV map count"),
             ('NAME', "Object", "Sort by object name"),
         ],
@@ -516,7 +587,7 @@ class YLOMNIHUD_MeshCheckSettings(bpy.types.PropertyGroup):
         update=_update_check_sort,
     )
     check_sort_descending: BoolProperty(name="Descending", default=True, update=_update_check_sort)
-    preview_results: CollectionProperty(type=YLOMNIHUD_PreviewResultItem)
-    check_results: CollectionProperty(type=YLOMNIHUD_CheckResultItem)
-    active_preview_index: IntProperty(default=0, min=0, update=_update_active_preview_index)
-    active_check_index: IntProperty(default=0, min=0, update=_update_active_check_index)
+    preview_results: CollectionProperty(type=YLOMNIHUD_PreviewResultItem, options={'SKIP_SAVE'})
+    check_results: CollectionProperty(type=YLOMNIHUD_CheckResultItem, options={'SKIP_SAVE'})
+    active_preview_index: IntProperty(default=0, min=0, update=_update_active_preview_index, options={'SKIP_SAVE'})
+    active_check_index: IntProperty(default=0, min=0, update=_update_active_check_index, options={'SKIP_SAVE'})

@@ -6,6 +6,11 @@ from mathutils import Vector
 
 from ..overlay.core import get_prefs
 from .core.config import get_visible_check_definitions
+from .core.limits import (
+    MAX_FACE_PRIMITIVES,
+    MAX_POINT_PRIMITIVES,
+    MAX_SEGMENT_PRIMITIVES,
+)
 from .core.results import (
     get_active_check_object_name,
     get_active_check_overlay_data,
@@ -22,9 +27,6 @@ LINE_WIDTH = 2.5
 POINT_SIZE_MAX = 8.0
 POINT_SIZE_MIN = 4.0
 POINT_SIZE_FACTOR = 0.08
-MAX_SEGMENT_PRIMITIVES = 12000
-MAX_POINT_PRIMITIVES = 8000
-MAX_FACE_PRIMITIVES = 1500
 MAX_BATCH_CACHE_ITEMS = 16
 
 def _use_xray_depth(context):
@@ -121,15 +123,18 @@ def _store_batch_cache_entry(cache_key, batch):
     DRAW_BATCH_CACHE[cache_key] = batch
 
 
-def _draw_segments(segments, color, offset=0.0, object_name="", payload_token=0):
+def _draw_segments(segments, color, offset=0.0, object_name="", payload_token=0, cacheable=True):
     if not segments:
         return
 
     segments = _limit_payload(segments, MAX_SEGMENT_PRIMITIVES)
     shader = _get_line_shader()
     viewport = gpu.state.viewport_get()
-    cache_key = _batch_cache_key("segments", object_name, color, offset, len(segments), payload_token)
-    batch = DRAW_BATCH_CACHE.get(cache_key)
+    cache_key = None
+    batch = None
+    if cacheable:
+        cache_key = _batch_cache_key("segments", object_name, color, offset, len(segments), payload_token)
+        batch = DRAW_BATCH_CACHE.get(cache_key)
     if batch is None:
         coords = []
         for segment in segments:
@@ -137,7 +142,8 @@ def _draw_segments(segments, color, offset=0.0, object_name="", payload_token=0)
             end = segment["end"] + segment["end_normal"] * offset
             coords.extend((start, end))
         batch = batch_for_shader(shader, "LINES", {"pos": coords})
-        _store_batch_cache_entry(cache_key, batch)
+        if cacheable:
+            _store_batch_cache_entry(cache_key, batch)
     shader.bind()
     shader.uniform_float("viewportSize", (viewport[2], viewport[3]))
     shader.uniform_float("lineWidth", LINE_WIDTH)
@@ -167,11 +173,12 @@ def _get_screen_bounds(region, region_data, corners):
     return max_x - min_x, max_y - min_y
 
 
-def _get_dynamic_point_size(context):
+def _get_dynamic_point_size(context, object_name=None):
     region = getattr(context, "region", None)
     region_data = getattr(context, "region_data", None)
     view_layer = getattr(context, "view_layer", None)
-    object_name = get_active_check_object_name(context)
+    if object_name is None:
+        object_name = get_active_check_object_name(context)
     obj = view_layer.objects.get(object_name) if view_layer is not None and object_name else None
     if region is None or region_data is None or obj is None:
         return POINT_SIZE_MAX
@@ -185,18 +192,22 @@ def _get_dynamic_point_size(context):
     return max(POINT_SIZE_MIN, min(POINT_SIZE_MAX, frame_size * POINT_SIZE_FACTOR))
 
 
-def _draw_points(points, color, offset=0.0, point_size=POINT_SIZE_MAX, object_name="", payload_token=0):
+def _draw_points(points, color, offset=0.0, point_size=POINT_SIZE_MAX, object_name="", payload_token=0, cacheable=True):
     if not points:
         return
 
     points = _limit_payload(points, MAX_POINT_PRIMITIVES)
     shader = _get_point_shader()
-    cache_key = _batch_cache_key("points", object_name, color, offset, len(points), payload_token, point_size=point_size)
-    batch = DRAW_BATCH_CACHE.get(cache_key)
+    cache_key = None
+    batch = None
+    if cacheable:
+        cache_key = _batch_cache_key("points", object_name, color, offset, len(points), payload_token, point_size=point_size)
+        batch = DRAW_BATCH_CACHE.get(cache_key)
     if batch is None:
         coords = [point["point"] + point["normal"] * offset for point in points]
         batch = batch_for_shader(shader, "POINTS", {"pos": coords})
-        _store_batch_cache_entry(cache_key, batch)
+        if cacheable:
+            _store_batch_cache_entry(cache_key, batch)
     gpu.state.program_point_size_set(True)
     gpu.state.point_size_set(point_size)
     shader.bind()
@@ -207,29 +218,47 @@ def _draw_points(points, color, offset=0.0, point_size=POINT_SIZE_MAX, object_na
     gpu.state.program_point_size_set(False)
 
 
-def _draw_faces(faces, color, offset=0.0, object_name="", payload_token=0):
+def _draw_faces(faces, color, offset=0.0, object_name="", payload_token=0, cacheable=True):
     if not faces:
         return
 
     faces = _limit_payload(faces, MAX_FACE_PRIMITIVES)
     shader = _get_face_shader()
     gpu.state.face_culling_set("NONE")
-    cache_key = _batch_cache_key("faces", object_name, color, offset, len(faces), payload_token)
-    batches = DRAW_BATCH_CACHE.get(cache_key)
-    if batches is None:
-        batches = []
+    cache_key = None
+    batch = None
+    if cacheable:
+        cache_key = _batch_cache_key("faces", object_name, color, offset, len(faces), payload_token)
+        cached_batch = DRAW_BATCH_CACHE.get(cache_key)
+        if cached_batch is not None and hasattr(cached_batch, "draw"):
+            batch = cached_batch
+    if batch is None:
+        coords = []
+        indices = []
         for face in faces:
-            coords = [vert + (face["normal"] * offset) for vert in face["verts"]]
-            indices = face.get("indices") or []
-            if len(coords) < 3:
+            face_coords = [vert + (face["normal"] * offset) for vert in face["verts"]]
+            if len(face_coords) < 3:
                 continue
-            batches.append(batch_for_shader(shader, "TRIS", {"pos": coords}, indices=indices))
-        _store_batch_cache_entry(cache_key, batches)
+            base_index = len(coords)
+            coords.extend(face_coords)
+            face_indices = face.get("indices") or [
+                (0, index, index + 1)
+                for index in range(1, len(face_coords) - 1)
+            ]
+            indices.extend(
+                tuple(base_index + index for index in triangle)
+                for triangle in face_indices
+                if len(triangle) == 3
+            )
+        if not coords or not indices:
+            return
+        batch = batch_for_shader(shader, "TRIS", {"pos": coords}, indices=indices)
+        if cacheable:
+            _store_batch_cache_entry(cache_key, batch)
 
     shader.bind()
     shader.uniform_float("color", color)
-    for batch in batches:
-        batch.draw(shader)
+    batch.draw(shader)
     gpu.state.face_culling_set("NONE")
 
 
@@ -238,21 +267,30 @@ def _draw_overlay_for_settings(context, data):
     prefs = get_prefs()
     if prefs is None:
         return
-    point_size = _get_dynamic_point_size(context)
-    object_name = get_active_check_object_name(context)
     payload_token = data.get("_batch_signature") if isinstance(data, dict) else None
     if payload_token is None:
         payload_token = id(data)
+    object_name = data.get("_edit_dynamic_object") if isinstance(data, dict) else ""
+    if not object_name:
+        object_name = get_active_check_object_name(context)
+    point_size = _get_dynamic_point_size(context, object_name)
 
     for definition in definitions:
         color = tuple(getattr(prefs, definition["pref_color_prop"]))
         offset = getattr(prefs, definition["pref_offset_prop"])
-        payload = data.get(definition["payload_key"])
+        payload_key = definition["payload_key"]
+        payload = data.get(payload_key)
         extra_face_payload = data.get(definition["extra_face_payload_key"]) if definition.get("extra_face_payload_key") else None
         if definition["draw_kind"] == "segments":
             if extra_face_payload:
                 _draw_faces(extra_face_payload, color, offset, object_name=object_name, payload_token=payload_token)
-            _draw_segments(payload, color, offset, object_name=object_name, payload_token=payload_token)
+            _draw_segments(
+                payload,
+                color,
+                offset,
+                object_name=object_name,
+                payload_token=(payload_token, payload_key),
+            )
         elif definition["draw_kind"] == "points":
             if extra_face_payload:
                 _draw_faces(extra_face_payload, color, offset, object_name=object_name, payload_token=payload_token)
@@ -262,10 +300,16 @@ def _draw_overlay_for_settings(context, data):
                 offset,
                 point_size=point_size,
                 object_name=object_name,
-                payload_token=payload_token,
+                payload_token=(payload_token, payload_key),
             )
         elif definition["draw_kind"] == "faces":
-            _draw_faces(payload, color, offset, object_name=object_name, payload_token=payload_token)
+            _draw_faces(
+                payload,
+                color,
+                offset,
+                object_name=object_name,
+                payload_token=(payload_token, payload_key),
+            )
 
 
 def draw_callback_view():

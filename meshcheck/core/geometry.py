@@ -17,6 +17,11 @@ from .config import (
     get_pole_threshold,
     get_tiny_face_area_threshold,
 )
+from .limits import (
+    MAX_FACE_PRIMITIVES,
+    MAX_POINT_PRIMITIVES,
+    MAX_SEGMENT_PRIMITIVES,
+)
 
 
 OBJECT_MEMOS = {}
@@ -60,7 +65,7 @@ def _get_evaluated_triangle_signature(obj, depsgraph=None):
 def _get_preview_metadata_signature(obj):
     mesh = getattr(obj, "data", None) if obj is not None else None
     if mesh is None:
-        return ((), 0)
+        return ((), 0, 0)
 
     try:
         material_signature = tuple(
@@ -76,7 +81,12 @@ def _get_preview_metadata_signature(obj):
     except Exception:
         uv_count = 0
 
-    return material_signature, uv_count
+    try:
+        material_slot_count = len(getattr(obj, "material_slots", ()))
+    except Exception:
+        material_slot_count = 0
+
+    return material_signature, material_slot_count, uv_count
 
 
 def _get_preview_object_state_signature(obj, depsgraph=None):
@@ -139,12 +149,15 @@ def _point_payload(coord, normal):
     return (tuple(coord), tuple(normal))
 
 
-def _segment_payload(start, end, start_normal, end_normal):
+def _triangle_segment_payloads(a, b, c, normal):
+    a_coord = tuple(a)
+    b_coord = tuple(b)
+    c_coord = tuple(c)
+    normal_coord = tuple(normal)
     return (
-        tuple(start),
-        tuple(end),
-        tuple(start_normal),
-        tuple(end_normal),
+        (a_coord, b_coord, normal_coord, normal_coord),
+        (b_coord, c_coord, normal_coord, normal_coord),
+        (c_coord, a_coord, normal_coord, normal_coord),
     )
 
 
@@ -190,9 +203,7 @@ class CheckGeometryMemo:
     ngon_faces: list = field(default_factory=list)
     double_points: list = field(default_factory=list)
     long_tri_segments: list = field(default_factory=list)
-    long_tri_faces: list = field(default_factory=list)
     tiny_face_points: list = field(default_factory=list)
-    tiny_face_faces: list = field(default_factory=list)
     pole_points: list = field(default_factory=list)
     isolated_points: list = field(default_factory=list)
     missing_sharp_segments: list = field(default_factory=list)
@@ -231,9 +242,7 @@ class CheckGeometryMemo:
         self.ngon_faces.clear()
         self.double_points.clear()
         self.long_tri_segments.clear()
-        self.long_tri_faces.clear()
         self.tiny_face_points.clear()
-        self.tiny_face_faces.clear()
         self.pole_points.clear()
         self.isolated_points.clear()
         self.missing_sharp_segments.clear()
@@ -281,10 +290,8 @@ class CheckGeometryMemo:
         self.ngon_faces = []
         self.long_tri_count = 0
         self.long_tri_segments = []
-        self.long_tri_faces = []
         self.tiny_face_count = 0
         self.tiny_face_points = []
-        self.tiny_face_faces = []
 
         capture_ngons = "NGONS" in self.enabled_ids
         capture_long_tris = "LONG_TRIS" in self.enabled_ids
@@ -301,20 +308,12 @@ class CheckGeometryMemo:
                 area = face.calc_area()
                 if area <= tiny_face_threshold:
                     self.tiny_face_count += 1
-                    if self.detailed:
+                    if self.detailed and len(self.tiny_face_points) < MAX_POINT_PRIMITIVES:
                         self.tiny_face_points.append(_point_payload(face.calc_center_median(), face.normal))
-                        verts = [tuple(vert.co) for vert in face.verts]
-                        self.tiny_face_faces.append(
-                            {
-                                "verts": verts,
-                                "indices": _safe_triangles(verts),
-                                "normal": tuple(face.normal),
-                            }
-                        )
 
             if capture_ngons and len(face.verts) > 4:
                 self.ngon_count += 1
-                if self.detailed:
+                if self.detailed and len(self.ngon_faces) < MAX_FACE_PRIMITIVES:
                     verts = [tuple(vert.co) for vert in face.verts]
                     self.ngon_faces.append(
                         {
@@ -338,21 +337,11 @@ class CheckGeometryMemo:
             if not self.detailed:
                 continue
 
-            verts = [tuple(vert.co) for vert in face.verts]
-            self.long_tri_faces.append(
-                {
-                    "verts": verts,
-                    "indices": _safe_triangles(verts),
-                    "normal": tuple(face.normal),
-                }
-            )
+            if len(self.long_tri_segments) >= MAX_SEGMENT_PRIMITIVES - 2:
+                continue
 
             self.long_tri_segments.extend(
-                (
-                    _segment_payload(a, b, face.normal, face.normal),
-                    _segment_payload(b, c, face.normal, face.normal),
-                    _segment_payload(c, a, face.normal, face.normal),
-                )
+                _triangle_segment_payloads(a, b, c, face.normal)
             )
 
     def _capture_verts(self, bm):
@@ -387,11 +376,11 @@ class CheckGeometryMemo:
                 edge_count = len(vert.link_edges)
                 if capture_poles and edge_count > pole_threshold:
                     self.pole_count += 1
-                    if self.detailed:
+                    if self.detailed and len(self.pole_points) < MAX_POINT_PRIMITIVES:
                         self.pole_points.append(_point_payload(vert.co, vert.normal))
                 if capture_isolated and edge_count == 0:
                     self.isolated_vert_count += 1
-                    if self.detailed:
+                    if self.detailed and len(self.isolated_points) < MAX_POINT_PRIMITIVES:
                         self.isolated_points.append(_point_payload(vert.co, vert.normal))
 
         if not capture_doubles:
@@ -404,7 +393,8 @@ class CheckGeometryMemo:
             if not self.detailed:
                 continue
             for vert in verts:
-                self.double_points.append(_point_payload(vert.co, vert.normal))
+                if len(self.double_points) < MAX_POINT_PRIMITIVES:
+                    self.double_points.append(_point_payload(vert.co, vert.normal))
 
     def _capture_edges(self, bm):
         self.non_manifold_count = 0
@@ -426,7 +416,7 @@ class CheckGeometryMemo:
             is_manifold = edge.is_manifold
             if capture_non_manifold and not is_manifold:
                 self.non_manifold_count += 1
-                if self.detailed:
+                if self.detailed and len(self.non_manifold_segments) < MAX_SEGMENT_PRIMITIVES:
                     self.non_manifold_segments.append(
                         (
                             tuple(edge.verts[0].co),
@@ -450,7 +440,7 @@ class CheckGeometryMemo:
             if abs(angle) <= threshold:
                 continue
             self.missing_sharp_edge_count += 1
-            if self.detailed:
+            if self.detailed and len(self.missing_sharp_segments) < MAX_SEGMENT_PRIMITIVES:
                 self.missing_sharp_segments.append(
                     (
                         tuple(edge.verts[0].co),
@@ -521,7 +511,6 @@ class CheckGeometryMemo:
         return {
             "ngon_faces": transform_faces(self.ngon_faces) if "NGONS" in visible_ids else [],
             "double_points": transform_points(self.double_points) if "DOUBLES" in visible_ids else [],
-            "long_tri_faces": transform_faces(self.long_tri_faces) if "LONG_TRIS" in visible_ids else [],
             "long_tri_segments": [
                 {
                     "start": matrix_world @ Vector(start),
@@ -532,7 +521,6 @@ class CheckGeometryMemo:
                 for start, end, start_normal, end_normal in self.long_tri_segments
             ] if "LONG_TRIS" in visible_ids else [],
             "tiny_face_points": transform_points(self.tiny_face_points) if "TINY_FACES" in visible_ids else [],
-            "tiny_face_faces": transform_faces(self.tiny_face_faces) if "TINY_FACES" in visible_ids else [],
             "pole_points": transform_points(self.pole_points) if "POLES" in visible_ids else [],
             "isolated_points": transform_points(self.isolated_points) if "ISOLATED_VERTS" in visible_ids else [],
             "non_manifold_segments": [

@@ -18,6 +18,11 @@ from .geometry import (
     _triangle_long_ratio,
     get_geometry_memo,
 )
+from .limits import (
+    MAX_FACE_PRIMITIVES,
+    MAX_POINT_PRIMITIVES,
+    MAX_SEGMENT_PRIMITIVES,
+)
 from .runtime import (
     CHECK_CACHE,
     RUNNING_CHECK_KEY,
@@ -41,11 +46,6 @@ def _active_mesh_object(context):
     return active_object
 
 
-def _transform_edit_point_payload(matrix_world, coord, normal):
-    normal_matrix = matrix_world.to_3x3()
-    return _transform_edit_point_payload_fast(matrix_world, normal_matrix, coord, normal)
-
-
 def _transform_edit_normal_payload_fast(normal_matrix, normal):
     try:
         return (normal_matrix @ Vector(normal)).normalized()
@@ -67,18 +67,6 @@ def _transform_edit_point_payload_fast(matrix_world, normal_matrix, coord, norma
     }
 
 
-def _transform_edit_segment_payload(matrix_world, start, end, start_normal, end_normal):
-    normal_matrix = matrix_world.to_3x3()
-    return _transform_edit_segment_payload_fast(
-        matrix_world,
-        normal_matrix,
-        start,
-        end,
-        start_normal,
-        end_normal,
-    )
-
-
 def _transform_edit_segment_payload_fast(matrix_world, normal_matrix, start, end, start_normal, end_normal):
     try:
         start_point = matrix_world @ Vector(start)
@@ -98,9 +86,48 @@ def _transform_edit_segment_payload_fast(matrix_world, normal_matrix, start, end
     }
 
 
-def _transform_edit_face_payload(matrix_world, verts, indices, normal):
-    normal_matrix = matrix_world.to_3x3()
-    return _transform_edit_face_payload_fast(matrix_world, normal_matrix, verts, indices, normal)
+def _transform_edit_edge_payload_fast(matrix_world, normal_matrix, edge):
+    start_vert, end_vert = edge.verts
+    return {
+        "start": matrix_world @ start_vert.co,
+        "end": matrix_world @ end_vert.co,
+        "start_normal": _transform_edit_normal_payload_fast(normal_matrix, start_vert.normal),
+        "end_normal": _transform_edit_normal_payload_fast(normal_matrix, end_vert.normal),
+    }
+
+
+def _transform_edit_triangle_segments_payload_fast(matrix_world, normal_matrix, a, b, c, normal):
+    try:
+        a_point = matrix_world @ a
+        b_point = matrix_world @ b
+        c_point = matrix_world @ c
+    except Exception:
+        a_point = Vector(a)
+        b_point = Vector(b)
+        c_point = Vector(c)
+
+    transformed_normal = _transform_edit_normal_payload_fast(normal_matrix, normal)
+
+    return (
+        {
+            "start": a_point,
+            "end": b_point,
+            "start_normal": transformed_normal,
+            "end_normal": transformed_normal,
+        },
+        {
+            "start": b_point,
+            "end": c_point,
+            "start_normal": transformed_normal,
+            "end_normal": transformed_normal,
+        },
+        {
+            "start": c_point,
+            "end": a_point,
+            "start_normal": transformed_normal,
+            "end_normal": transformed_normal,
+        },
+    )
 
 
 def _transform_edit_face_payload_fast(matrix_world, normal_matrix, verts, indices, normal):
@@ -114,12 +141,19 @@ def _transform_edit_face_payload_fast(matrix_world, normal_matrix, verts, indice
     }
 
 
-def _build_edit_mode_overlay_payload(context, active_object, visible_ids):
-    bm = _get_edit_bmesh(active_object)
+def _edit_topology_signature(bm):
+    return (len(bm.verts), len(bm.edges), len(bm.faces))
+
+
+def _build_edit_mode_overlay_payload(context, active_object, visible_ids, bm=None):
+    if bm is None:
+        bm = _get_edit_bmesh(active_object)
     if bm is None:
         return None
 
     payload = _empty_overlay_payload()
+    payload["_edit_dynamic_object"] = active_object.name
+    payload["_edit_topology_signature"] = _edit_topology_signature(bm)
     matrix_world = active_object.matrix_world
     normal_matrix = matrix_world.to_3x3()
     visible_ids = set(visible_ids)
@@ -130,6 +164,13 @@ def _build_edit_mode_overlay_payload(context, active_object, visible_ids):
     capture_tiny_faces = "TINY_FACES" in visible_ids
     capture_poles = "POLES" in visible_ids
     capture_isolated = "ISOLATED_VERTS" in visible_ids
+    ngon_faces = []
+    if capture_ngons or capture_long_tris or capture_tiny_faces:
+        bm.verts.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        bm.verts.index_update()
+        bm.faces.index_update()
+
     if capture_ngons or capture_long_tris or capture_tiny_faces:
         long_tri_threshold = get_long_tri_ratio_threshold(context) if capture_long_tris else None
         tiny_face_threshold = get_tiny_face_area_threshold(context) if capture_tiny_faces else None
@@ -138,37 +179,28 @@ def _build_edit_mode_overlay_payload(context, active_object, visible_ids):
         for face in bm.faces:
             face_vert_count = len(face.verts)
 
-            if capture_ngons and face_vert_count > 4:
+            if capture_ngons and face_vert_count > 4 and len(ngon_faces) < MAX_FACE_PRIMITIVES:
                 verts = [tuple(vert.co) for vert in face.verts]
-                payload["ngon_faces"].append(
+                ngon_faces.append(
                     _transform_edit_face_payload_fast(
                         matrix_world,
                         normal_matrix,
                         verts,
-                        _safe_triangles(verts),
+                        tuple(_safe_triangles(verts)),
                         tuple(face.normal),
                     )
                 )
 
             if capture_tiny_faces and face.calc_area() <= tiny_face_threshold:
-                payload["tiny_face_points"].append(
-                    _transform_edit_point_payload_fast(
-                        matrix_world,
-                        normal_matrix,
-                        tuple(face.calc_center_median()),
-                        tuple(face.normal),
+                if len(payload["tiny_face_points"]) < MAX_POINT_PRIMITIVES:
+                    payload["tiny_face_points"].append(
+                        _transform_edit_point_payload_fast(
+                            matrix_world,
+                            normal_matrix,
+                            tuple(face.calc_center_median()),
+                            tuple(face.normal),
+                        )
                     )
-                )
-                verts = [tuple(vert.co) for vert in face.verts]
-                payload["tiny_face_faces"].append(
-                    _transform_edit_face_payload_fast(
-                        matrix_world,
-                        normal_matrix,
-                        verts,
-                        _safe_triangles(verts),
-                        tuple(face.normal),
-                    )
-                )
 
             if not capture_long_tris or face_vert_count != 3:
                 continue
@@ -180,49 +212,35 @@ def _build_edit_mode_overlay_payload(context, active_object, visible_ids):
             if ratio < long_tri_threshold:
                 continue
 
+            if len(payload["long_tri_segments"]) >= MAX_SEGMENT_PRIMITIVES - 2:
+                continue
+
             face_normal = tuple(face.normal)
-            payload["long_tri_faces"].append(
-                _transform_edit_face_payload_fast(
+            payload["long_tri_segments"].extend(
+                _transform_edit_triangle_segments_payload_fast(
                     matrix_world,
                     normal_matrix,
-                    [tuple(a), tuple(b), tuple(c)],
-                    [(0, 1, 2)],
+                    a,
+                    b,
+                    c,
                     face_normal,
                 )
             )
-            payload["long_tri_segments"].extend(
-                (
-                    _transform_edit_segment_payload_fast(
-                        matrix_world,
-                        normal_matrix,
-                        tuple(a),
-                        tuple(b),
-                        face_normal,
-                        face_normal,
-                    ),
-                    _transform_edit_segment_payload_fast(
-                        matrix_world,
-                        normal_matrix,
-                        tuple(b),
-                        tuple(c),
-                        face_normal,
-                        face_normal,
-                    ),
-                    _transform_edit_segment_payload_fast(
-                        matrix_world,
-                        normal_matrix,
-                        tuple(c),
-                        tuple(a),
-                        face_normal,
-                        face_normal,
-                    ),
-                )
-            )
+
+    if capture_ngons:
+        payload["ngon_faces"] = ngon_faces
 
     if capture_doubles or capture_long_tris or capture_tiny_faces or capture_poles or capture_isolated:
         double_epsilon = max(get_double_epsilon(context), MIN_DOUBLE_EPSILON) if capture_doubles else None
         pole_threshold = get_pole_threshold(context) if capture_poles else None
         buckets = {}
+        double_indices = []
+        pole_indices = []
+        isolated_indices = []
+
+        if capture_doubles or capture_poles or capture_isolated:
+            bm.verts.ensure_lookup_table()
+            bm.verts.index_update()
 
         for vert in bm.verts:
             if capture_doubles:
@@ -237,61 +255,76 @@ def _build_edit_mode_overlay_payload(context, active_object, visible_ids):
             if capture_poles or capture_isolated:
                 edge_count = len(vert.link_edges)
                 if capture_poles and edge_count > pole_threshold:
-                    payload["pole_points"].append(
-                        _transform_edit_point_payload_fast(
-                            matrix_world,
-                            normal_matrix,
-                            tuple(vert.co),
-                            tuple(vert.normal),
-                        )
-                    )
+                    if len(pole_indices) < MAX_POINT_PRIMITIVES:
+                        pole_indices.append(vert.index)
                 if capture_isolated and edge_count == 0:
-                    payload["isolated_points"].append(
-                        _transform_edit_point_payload_fast(
-                            matrix_world,
-                            normal_matrix,
-                            tuple(vert.co),
-                            tuple(vert.normal),
-                        )
-                    )
+                    if len(isolated_indices) < MAX_POINT_PRIMITIVES:
+                        isolated_indices.append(vert.index)
+
+        if capture_poles:
+            payload["pole_points"] = [
+                _transform_edit_point_payload_fast(
+                    matrix_world,
+                    normal_matrix,
+                    tuple(bm.verts[index].co),
+                    tuple(bm.verts[index].normal),
+                )
+                for index in pole_indices
+            ]
+        if capture_isolated:
+            payload["isolated_points"] = [
+                _transform_edit_point_payload_fast(
+                    matrix_world,
+                    normal_matrix,
+                    tuple(bm.verts[index].co),
+                    tuple(bm.verts[index].normal),
+                )
+                for index in isolated_indices
+            ]
 
         if capture_doubles:
             for verts in buckets.values():
                 if len(verts) <= 1:
                     continue
                 for vert in verts:
-                    payload["double_points"].append(
-                        _transform_edit_point_payload_fast(
-                            matrix_world,
-                            normal_matrix,
-                            tuple(vert.co),
-                            tuple(vert.normal),
-                        )
-                    )
+                    if len(double_indices) < MAX_POINT_PRIMITIVES:
+                        double_indices.append(vert.index)
+            payload["double_points"] = [
+                _transform_edit_point_payload_fast(
+                    matrix_world,
+                    normal_matrix,
+                    tuple(bm.verts[index].co),
+                    tuple(bm.verts[index].normal),
+                )
+                for index in double_indices
+            ]
 
     capture_non_manifold = "NON_MANIFOLD" in visible_ids
     capture_missing_sharp = "MISSING_SHARP" in visible_ids
     if capture_non_manifold or capture_missing_sharp:
         threshold = get_missing_sharp_angle_radians(context) if capture_missing_sharp else None
         skip_marked = get_missing_sharp_skip_marked(context) if capture_missing_sharp else None
+        non_manifold_edge_indices = []
+
+        if capture_non_manifold or capture_missing_sharp:
+            bm.edges.ensure_lookup_table()
+            bm.edges.index_update()
+
         for edge in bm.edges:
             if len(edge.verts) != 2:
                 continue
             is_manifold = edge.is_manifold
 
             if capture_non_manifold and not is_manifold:
-                payload["non_manifold_segments"].append(
-                    _transform_edit_segment_payload_fast(
-                        matrix_world,
-                        normal_matrix,
-                        tuple(edge.verts[0].co),
-                        tuple(edge.verts[1].co),
-                        tuple(edge.verts[0].normal),
-                        tuple(edge.verts[1].normal),
-                    )
-                )
+                if len(non_manifold_edge_indices) < MAX_SEGMENT_PRIMITIVES:
+                    non_manifold_edge_indices.append(edge.index)
 
-            if not capture_missing_sharp or not is_manifold or len(edge.link_faces) != 2:
+            if (
+                not capture_missing_sharp
+                or len(payload["missing_sharp_segments"]) >= MAX_SEGMENT_PRIMITIVES
+                or not is_manifold
+                or len(edge.link_faces) != 2
+            ):
                 continue
             if skip_marked and getattr(edge, "smooth", True) is False:
                 continue
@@ -305,15 +338,14 @@ def _build_edit_mode_overlay_payload(context, active_object, visible_ids):
             if abs(angle) <= threshold:
                 continue
             payload["missing_sharp_segments"].append(
-                _transform_edit_segment_payload_fast(
-                    matrix_world,
-                    normal_matrix,
-                    tuple(edge.verts[0].co),
-                    tuple(edge.verts[1].co),
-                    tuple(edge.verts[0].normal),
-                    tuple(edge.verts[1].normal),
-                )
+                _transform_edit_edge_payload_fast(matrix_world, normal_matrix, edge)
             )
+
+        if capture_non_manifold:
+            payload["non_manifold_segments"] = [
+                _transform_edit_edge_payload_fast(matrix_world, normal_matrix, bm.edges[index])
+                for index in non_manifold_edge_indices
+            ]
 
     return payload
 
@@ -389,6 +421,4 @@ def get_edit_mode_active_check_overlay_data(context):
     ):
         return CHECK_CACHE["edit_data"]
 
-    payload = _build_edit_mode_overlay_payload(context, active_object, visible_ids)
-    _store_edit_check_overlay_cache(active_object.name, matrix_signature, prefs_signature, payload)
-    return payload
+    return None
